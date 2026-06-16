@@ -12,12 +12,14 @@ const config = {
   msaberSubscribePath: process.env.MSABER_SUBSCRIBE_PATH || "/api/v1/subscribe/save",
   msaberDeletePath: process.env.MSABER_DELETE_PATH || "/api/v1/subscribe/delete",
   msaberListPath: process.env.MSABER_LIST_PATH || "/api/v1/subscribe/page?pageNum=1&pageSize=200",
+  msaberDownloadingPath: process.env.MSABER_DOWNLOADING_PATH || "/api/v1/download/downloading",
+  msaberDownloadHistoryPath: process.env.MSABER_DOWNLOAD_HISTORY_PATH || "/api/v1/download/history?pageNum=1&pageSize=200",
+  msaberDownloadDeletePath: process.env.MSABER_DOWNLOAD_DELETE_PATH || "/api/v1/download/delete",
   msaberRequestTimeoutMs: Number(process.env.MSABER_REQUEST_TIMEOUT_MS || 10000),
   dryRun: parseBoolean(process.env.DRY_RUN, true)
 };
 
 const logFile = path.join(config.dataDir, "requests.jsonl");
-const mappingFile = path.join(config.dataDir, "mappings.json");
 
 ensureDataDir();
 
@@ -84,11 +86,11 @@ const server = http.createServer(async (request, response) => {
     }
 
     if (request.method === "GET" && /^\/api\/v1\/subscribe\/media\/[^/]+\/?$/.test(parsedUrl.pathname)) {
-      return handleSubscribeLookup(parsedUrl.pathname, response);
+      return handleSubscribeLookup(parsedUrl, response);
     }
 
     if (request.method === "DELETE" && /^\/api\/v1\/subscribe\/media\/[^/]+\/?$/.test(parsedUrl.pathname)) {
-      return sendJson(response, 200, moviePilotOk(true, "Deleted"));
+      return handleSubscribeMediaDelete(parsedUrl, response);
     }
 
     if (request.method === "GET" && /^\/api\/v1\/subscribe\/status\/[^/]+\/?$/.test(parsedUrl.pathname)) {
@@ -146,7 +148,6 @@ function parseBoolean(value, defaultValue) {
 
 function ensureDataDir() {
   fs.mkdirSync(config.dataDir, { recursive: true });
-  if (!fs.existsSync(mappingFile)) fs.writeFileSync(mappingFile, "{}\n");
 }
 
 function readRequestBody(request) {
@@ -250,15 +251,22 @@ async function handleSubscribe(requestInfo, response) {
     }, "Probe accepted"));
   }
 
+  const existing = await findExistingSubscription(normalized);
+  if (existing) {
+    return sendJson(response, 200, moviePilotOk({
+      id: existing.id,
+      dryRun: config.dryRun,
+      duplicate: true,
+      msaber: {
+        forwarded: false,
+        reason: "already-subscribed",
+        body: { code: 20000, message: "SUCCESS", data: existing.id }
+      }
+    }, "Subscription already exists"));
+  }
+
   const adapterId = buildMappingKey(normalized);
   const msaberResult = await forwardToMsaber("subscribe", normalized);
-
-  saveMapping(adapterId, {
-    adapterId,
-    createdAt: new Date().toISOString(),
-    forward: normalized,
-    msaber: msaberResult
-  });
 
   return sendJson(response, 200, moviePilotOk({
     id: adapterId,
@@ -267,13 +275,39 @@ async function handleSubscribe(requestInfo, response) {
   }, config.dryRun ? "Dry run subscription recorded" : "Subscription forwarded"));
 }
 
+async function findExistingSubscription(payload) {
+  const lookup = {
+    value: payload.tmdbId || payload.imdbId || payload.title,
+    title: payload.title,
+    year: payload.year,
+    type: payload.type,
+    season: payload.season || ""
+  };
+  const items = await getMoviePilotMediaStates();
+  return items.find(item => isSubscribeMatch(item, lookup));
+}
+
+async function handleSubscribeMediaDelete(parsedUrl, response) {
+  const lookup = parseMediaLookup(parsedUrl);
+  const items = await getMoviePilotMediaStates({ merge: false });
+  const foundItems = items.filter(item => isSubscribeMatch(item, lookup));
+
+  if (foundItems.length === 0) {
+    return sendJson(response, 200, moviePilotOk(true, "Deleted"));
+  }
+
+  const results = await Promise.all(foundItems.map(item => deleteMsaberStateItem(item)));
+  return sendJson(response, 200, moviePilotOk({
+    ids: foundItems.map(item => item.id),
+    sources: Array.from(new Set(foundItems.map(item => item.source || "subscribe"))),
+    msaber: results
+  }, "Deleted"));
+}
+
 async function handleDelete(requestInfo, response) {
   const normalized = normalizeForwardPayload(requestInfo.body, requestInfo.query);
   const adapterId = buildMappingKey(normalized);
   const msaberResult = await forwardToMsaber("delete", normalized);
-  const mappings = readMappings();
-  delete mappings[adapterId];
-  writeMappings(mappings);
 
   return sendJson(response, 200, moviePilotOk({
     id: adapterId,
@@ -283,23 +317,20 @@ async function handleDelete(requestInfo, response) {
 }
 
 async function handleSubscribeList(response) {
-  const items = await getMoviePilotSubscriptions();
-  return sendJson(response, 200, items);
+  const items = await getMoviePilotMediaStates();
+  return sendJson(response, 200, items.map(toForwardSubscribe));
 }
 
-async function handleSubscribeLookup(pathname, response) {
-  const mediaId = decodeURIComponent(pathname.replace(/^\/api\/v1\/subscribe\/media\//, "").replace(/\/$/, ""));
-  const items = await getMoviePilotSubscriptions();
-  const found = items.find(item => {
-    const candidates = [item.id, item.mediaid, item.media_id, item.tmdbid, item.tmdb_id, item.tmdbId];
-    return candidates.some(value => String(value || "") === mediaId);
-  });
-  return sendJson(response, 200, found || null);
+async function handleSubscribeLookup(parsedUrl, response) {
+  const lookup = parseMediaLookup(parsedUrl);
+  const items = await getMoviePilotMediaStates();
+  const found = items.find(item => isSubscribeMatch(item, lookup));
+  return sendJson(response, 200, found ? toForwardSubscribe(found) : null);
 }
 
 async function getMoviePilotSubscriptions() {
   if (config.dryRun || !isMsaberConfigured()) {
-    return Object.values(readMappings()).map(entry => toMoviePilotSubscribe(entry.forward, entry.msaber?.body?.data || entry.msaber?.body));
+    return [];
   }
 
   try {
@@ -308,11 +339,148 @@ async function getMoviePilotSubscriptions() {
       console.warn(`MSaber subscribe list request failed: ${result.status}`);
       return [];
     }
-    return extractMsaberList(result.body).map(item => toMoviePilotSubscribe(item));
+    return mergeSubscriptions(extractMsaberList(result.body).map(item => toMoviePilotSubscribe(item)));
   } catch (error) {
     console.warn(`MSaber subscribe list request error: ${error.message || error}`);
     return [];
   }
+}
+
+async function getMoviePilotMediaStates(options = {}) {
+  const [subscriptions, downloads] = await Promise.all([
+    getMoviePilotSubscriptions(),
+    getMoviePilotDownloadStates()
+  ]);
+  const items = [...subscriptions, ...downloads];
+  return options.merge === false ? items : mergeSubscriptions(items);
+}
+
+async function getMoviePilotDownloadStates() {
+  if (config.dryRun || !isMsaberConfigured()) {
+    return [];
+  }
+
+  const results = await Promise.allSettled([
+    requestMsaber(config.msaberDownloadingPath, { method: "POST", body: {} }),
+    requestMsaber(config.msaberDownloadHistoryPath)
+  ]);
+
+  const items = [];
+  const [downloadingResult, historyResult] = results;
+  const historyItems = historyResult.status === "fulfilled" && historyResult.value.ok
+    ? extractMsaberList(historyResult.value.body)
+    : [];
+
+  if (downloadingResult.status === "fulfilled" && downloadingResult.value.ok) {
+    const downloadingItems = extractMsaberList(downloadingResult.value.body);
+    items.push(...downloadingItems.map(item => {
+      const fallback = findRelatedHistoryItem(item, historyItems);
+      return toMoviePilotSubscribe(item, {
+        source: "downloading",
+        state: "D",
+        tmdbId: fallback?.tmdbId || fallback?.tmdbid || fallback?.tmdb_id,
+        poster: fallback?.poster,
+        overview: fallback?.overview,
+        year: fallback?.year
+      });
+    }));
+  } else if (downloadingResult.status === "rejected") {
+    console.warn(`MSaber downloading request error: ${downloadingResult.reason?.message || downloadingResult.reason}`);
+  }
+
+  if (historyResult.status === "fulfilled" && historyResult.value.ok) {
+    items.push(...historyItems.map(item => toMoviePilotSubscribe(item, {
+      source: "downloaded",
+      state: "S"
+    })));
+  } else if (historyResult.status === "rejected") {
+    console.warn(`MSaber download history request error: ${historyResult.reason?.message || historyResult.reason}`);
+  }
+
+  return items;
+}
+
+function findRelatedHistoryItem(item, historyItems) {
+  const title = normalizedTitle(firstText(item.title, item.name));
+  const year = firstText(item.year);
+  const season = parseSeasonEpisode(item.seasonEpisode || item.season_episode || "").season;
+  if (!title) return null;
+
+  return historyItems.find(historyItem => {
+    const historyTitle = normalizedTitle(firstText(historyItem.title, historyItem.name));
+    const historyYear = firstText(historyItem.year);
+    const historySeason = parseSeasonEpisode(historyItem.seasonEpisode || historyItem.season_episode || "").season;
+    if (historyTitle !== title) return false;
+    if (year && historyYear && year !== historyYear) return false;
+    if (season && historySeason && season !== historySeason) return false;
+    return true;
+  }) || null;
+}
+
+function mergeSubscriptions(items) {
+  const merged = new Map();
+  for (const item of items) {
+    const key = [
+      item.type || "",
+      item.tmdbid || item.mediaid || normalizedTitle(item.name) || item.id || "",
+      item.season || "",
+      item.source === "subscribe" ? "subscribe" : "media-state"
+    ].join(":");
+    if (!merged.has(key) || isBetterSubscribeItem(item, merged.get(key))) {
+      merged.set(key, item);
+    }
+  }
+  return Array.from(merged.values());
+}
+
+function isBetterSubscribeItem(candidate, current) {
+  if (!current) return true;
+  if (candidate.source === "subscribe" && current.source !== "subscribe") return true;
+  if (candidate.source === "downloading" && current.source === "downloaded") return true;
+  if (candidate.source === "downloaded" && current.source === "downloading") return false;
+  if (candidate.tmdbid && !current.tmdbid) return true;
+  if (candidate.id && !current.id) return true;
+  if (candidate.poster && !current.poster) return true;
+  if (candidate.description && !current.description) return true;
+  return false;
+}
+
+function parseMediaLookup(parsedUrl) {
+  const mediaId = decodeURIComponent(parsedUrl.pathname.replace(/^\/api\/v1\/subscribe\/media\//, "").replace(/\/$/, ""));
+  const [kind, value] = mediaId.includes(":") ? mediaId.split(/:(.+)/) : ["", mediaId];
+  return {
+    kind,
+    value: value || mediaId,
+    season: parsedUrl.searchParams.get("season") || ""
+  };
+}
+
+function isSubscribeMatch(item, lookup) {
+  const ids = [item.tmdbid, item.mediaid, item.id].filter(value => value !== undefined && value !== null);
+  const idMatched = ids.some(value => String(value) === String(lookup.value));
+  const titleMatched = lookup.title && normalizedTitle(item.name) === normalizedTitle(lookup.title);
+  if (!idMatched && !titleMatched) return false;
+  if (lookup.type && item.type && item.type !== lookup.type) return false;
+  if (lookup.year && item.year && String(item.year) !== String(lookup.year)) return false;
+  if (!lookup.season) return true;
+  return !item.season || String(item.season) === String(lookup.season);
+}
+
+function toForwardSubscribe(item) {
+  const clone = { ...item };
+
+  if (clone.source && clone.source !== "subscribe") {
+    clone.state = "R";
+    clone.status = "R";
+    clone.note = clone.note || (clone.source === "downloaded" ? "已存在于 MSaber 已下载记录" : "已存在于 MSaber 下载任务");
+  }
+
+  clone.mediaid = clone.mediaid === undefined || clone.mediaid === null ? null : String(clone.mediaid);
+  clone.media_id = clone.media_id === undefined || clone.media_id === null ? clone.mediaid : String(clone.media_id);
+  clone.user = clone.user || clone.username || "msaber";
+  delete clone.source;
+
+  return clone;
 }
 
 function extractMsaberList(body) {
@@ -336,32 +504,79 @@ function toMoviePilotSubscribe(item = {}, fallback = {}) {
   const tmdbId = firstText(item.tmdbId, item.tmdbid, item.tmdb_id, item.mediaid, item.media_id, fallback.tmdbId, tmdbMedia.id);
   const id = firstText(item.id, item.subscribeId, item.rssId, fallback.id, tmdbId);
   const name = firstText(item.name, item.title, item.keyword, fallback.name, fallback.title, tmdbMedia.title, tmdbMedia.name);
-  const season = firstText(item.season, item.seasonNumber, item.season_number, fallback.season);
+  const parsedSeasonEpisode = parseSeasonEpisode(item.seasonEpisode || item.season_episode || item.episodes || "");
+  const season = firstText(item.season, item.seasonNumber, item.season_number, fallback.season, parsedSeasonEpisode.season);
+  const startEpisode = firstText(item.start_episode, item.startEpisode, item.episode, fallback.episode, parsedSeasonEpisode.episode);
+  const totalEpisode = firstText(item.total_episode, item.totalEpisode, item.total, item.episodes);
+  const description = firstText(item.description, item.overview, item.desc, fallback.overview, tmdbMedia.overview);
 
   return {
     id: toNumberOrMaybeString(id),
     name,
     title: name,
-    year: toNumberOrNull(firstText(item.year, item.releaseYear, item.release_year, fallback.year, tmdbMedia.year)),
+    year: firstText(item.year, item.releaseYear, item.release_year, fallback.year, tmdbMedia.year) || null,
     type: type === "movie" ? "movie" : "tv",
     tmdbid: toNumberOrMaybeString(tmdbId),
     tmdb_id: toNumberOrMaybeString(tmdbId),
     tmdbId: toNumberOrMaybeString(tmdbId),
-    imdbid: firstText(item.imdbId, item.imdbid, item.imdb_id, fallback.imdbId, tmdbMedia.imdbId),
     mediaid: toNumberOrMaybeString(firstText(item.mediaid, item.media_id, tmdbId)),
-    media_id: toNumberOrMaybeString(firstText(item.media_id, item.mediaid, tmdbId)),
+    media_id: toNumberOrMaybeString(firstText(item.mediaid, item.media_id, tmdbId)),
+    keyword: firstText(item.keyword, fallback.keyword) || null,
+    doubanid: firstText(item.doubanid, item.doubanId, fallback.doubanid) || null,
+    bangumiid: toNumberOrMaybeString(firstText(item.bangumiid, item.bangumiId, fallback.bangumiid)),
     season: toNumberOrNull(season),
-    season_number: toNumberOrNull(season),
-    start_episode: toNumberOrNull(firstText(item.startEpisode, item.start_episode, fallback.episode)),
-    episode: toNumberOrNull(firstText(item.episode, item.startEpisode, fallback.episode)),
-    status: firstText(item.status, fallback.status) || null,
-    username: "msaber",
-    user: "msaber",
     poster: firstText(item.poster, item.posterPath, item.poster_path, item.cover, fallback.poster, tmdbMedia.poster),
     backdrop: firstText(item.backdrop, item.backdropPath, item.backdrop_path, tmdbMedia.backdrop),
-    overview: firstText(item.overview, item.description, item.desc, fallback.overview, tmdbMedia.overview),
-    raw: item
+    vote: toNumberOrDefault(firstText(item.vote, tmdbMedia.vote), 0),
+    description: description || null,
+    filter: firstText(item.filter, fallback.filter) || null,
+    include: firstText(item.include, fallback.include) || null,
+    exclude: firstText(item.exclude, fallback.exclude) || null,
+    quality: firstText(item.quality, item.definition, fallback.quality) || null,
+    resolution: firstText(item.resolution, item.definition, fallback.resolution) || null,
+    effect: firstText(item.effect, fallback.effect) || null,
+    total_episode: toNumberOrNull(totalEpisode) || 0,
+    start_episode: toNumberOrNull(startEpisode) || 0,
+    lack_episode: toNumberOrNull(firstText(item.lack_episode, item.lackEpisode)) || 0,
+    completed_episode: toNumberOrNull(firstText(item.completed_episode, item.completedEpisode)),
+    note: item.note ?? null,
+    state: firstText(item.state, item.status, fallback.state) || null,
+    status: firstText(item.state, item.status, fallback.state) || null,
+    last_update: firstText(item.last_update, item.updatedAt, item.updateTime, fallback.last_update) || null,
+    username: firstText(item.username, fallback.username) || "msaber",
+    user: firstText(item.username, fallback.username) || "msaber",
+    sites: Array.isArray(item.sites) ? item.sites : null,
+    downloader: firstText(item.downloader, fallback.downloader) || null,
+    best_version: toNumberOrNull(firstText(item.best_version, item.bestVersion)) || 0,
+    best_version_full: toNumberOrNull(firstText(item.best_version_full, item.bestVersionFull)) || 0,
+    current_priority: toNumberOrNull(firstText(item.current_priority, item.currentPriority)),
+    episode_priority: item.episode_priority || item.episodePriority || null,
+    save_path: firstText(item.save_path, item.savePath, fallback.save_path) || null,
+    search_imdbid: toNumberOrNull(firstText(item.search_imdbid, item.searchImdbid, item.imdbId, item.imdbid, item.imdb_id, fallback.imdbId)) || 0,
+    date: firstText(item.date, item.createdAt, fallback.date) || null,
+    custom_words: firstText(item.custom_words, item.customWords) || null,
+    media_category: firstText(item.media_category, item.mediaCategory) || null,
+    filter_groups: Array.isArray(item.filter_groups) ? item.filter_groups : Array.isArray(item.filterGroups) ? item.filterGroups : null,
+    episode_group: firstText(item.episode_group, item.episodeGroup) || null,
+    source: fallback.source || "subscribe"
   };
+}
+
+function parseSeasonEpisode(value) {
+  const text = String(value || "");
+  const seasonMatch = text.match(/S(?:eason)?\s*0*(\d+)/i) || text.match(/第\s*(\d+)\s*季/);
+  const episodeMatch = text.match(/E(?:pisode)?\s*0*(\d+)/i) || text.match(/第\s*(\d+)\s*[集话期]/);
+  return {
+    season: seasonMatch?.[1] || "",
+    episode: episodeMatch?.[1] || ""
+  };
+}
+
+function normalizedTitle(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[\s._\-:：·,，。'"“”‘’（）()[\]【】]/g, "")
+    .trim();
 }
 
 function isProbePayload(payload) {
@@ -440,6 +655,40 @@ async function deleteMsaberSubscription(payload) {
     status: result.status,
     ok: result.ok,
     body: result.body
+  };
+}
+
+async function deleteMsaberStateItem(item) {
+  if (config.dryRun || !isMsaberConfigured()) {
+    return { forwarded: false, reason: "dry-run-or-unconfigured", item };
+  }
+
+  if (item.source === "downloading" && item.id) {
+    const result = await requestMsaber(`${config.msaberDownloadDeletePath.replace(/\/+$/g, "")}/${item.id}`, { method: "DELETE" });
+    return {
+      forwarded: true,
+      action: "delete-download",
+      status: result.status,
+      ok: result.ok,
+      body: result.body
+    };
+  }
+
+  if (item.source === "subscribe" && item.id) {
+    const result = await requestMsaber(`${config.msaberDeletePath.replace(/\/+$/g, "")}/${item.id}`, { method: "DELETE" });
+    return {
+      forwarded: true,
+      action: "delete-subscribe",
+      status: result.status,
+      ok: result.ok,
+      body: result.body
+    };
+  }
+
+  return {
+    forwarded: false,
+    reason: item.source === "downloaded" ? "already-downloaded-history-not-deleted" : "missing-msaber-id",
+    item
   };
 }
 
@@ -532,22 +781,4 @@ function toNumberOrMaybeString(value) {
 function toNumberOrDefault(value, defaultValue) {
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? number : defaultValue;
-}
-
-function readMappings() {
-  try {
-    return JSON.parse(fs.readFileSync(mappingFile, "utf8") || "{}");
-  } catch {
-    return {};
-  }
-}
-
-function writeMappings(mappings) {
-  fs.writeFileSync(mappingFile, `${JSON.stringify(mappings, null, 2)}\n`);
-}
-
-function saveMapping(id, value) {
-  const mappings = readMappings();
-  mappings[id] = value;
-  writeMappings(mappings);
 }

@@ -2,60 +2,27 @@
 
 作者：工位划水冠军
 
-`forward-msaber-adapter` 是一个给 Forward 用的 MSaber 服务器订阅适配器。它把 Forward 里“服务器订阅”功能发出来的 MoviePilot 风格请求，转换成 MSaber 可以接收的订阅请求。
+`forward-msaber-adapter` 是一个给 Forward 使用的 MSaber 服务器订阅适配器。它模拟 MoviePilot 的订阅接口，接收 Forward 的服务器订阅请求，并转发到 MSaber 的 API Key 接口。
 
 ## 解决什么问题
 
-Forward 官方的服务器订阅功能主要按 MoviePilot 的接口设计。如果你用的是 MSaber，就会遇到这些问题：
+Forward 的“服务器订阅”按 MoviePilot 接口调用，不能直接对接 MSaber。本服务作为中间层，解决这些问题：
 
-- Forward 能发起“订阅到服务器”的动作，但 MSaber 不是 MoviePilot 接口，不能直接无缝接上。
-- MSaber 有 API Key 机制，但不同版本、部署方式里的“新增订阅 / 取消订阅”接口路径可能不完全一样。
-- Forward 实际传了哪些字段不容易确认，调试时需要一个中间层记录请求。
-- NAS Docker 部署时，希望只暴露一个简单服务给 Forward，不想改 Forward 本体。
+- Forward 可以继续填写一个 MoviePilot 风格的服务器地址。
+- MSaber 只需要配置 API Key，不需要账号密码登录。
+- Forward 发来的订阅请求会转换成 MSaber `/api/v1/subscribe/save` 所需结构。
+- 重复点击 Forward 的订阅按钮时，适配器会按 MSaber 的订阅、下载中、已下载记录做幂等拦截，避免重复创建任务。
+- Forward 的联通测试 `tmdbid=-1` 会直接返回成功，不会转发给 MSaber。
 
-这个适配器做的事就是：
+## 使用边界
 
-- 接收 Forward 发来的服务器订阅请求。
-- 兼容常见 MoviePilot / Forward 字段，比如 `title`、`tmdb_id`、`season`、`type`、`year`。
-- 默认以 `DRY_RUN=true` 运行，只记录请求不真正调用 MSaber，方便先摸清 Forward 和 MSaber 的请求格式。
-- 配好 MSaber 地址、API Key 和订阅接口后，把请求转发给 MSaber。
-- Forward 查询 `/api/v1/subscribe/user/` 时，实时读取 MSaber 已有订阅并转换成 MoviePilot 风格列表，帮助 Forward 判断“已订阅 / 避免重复订阅”。
-- 保存请求日志和订阅映射，方便排查问题。
-- 自动识别 Forward 的联通测试请求，比如 `{"tmdbid":"-1"}`，这类请求只返回成功，不会转发到 MSaber。
+- Forward 当前订阅按钮不会稳定变成“已订阅”，也没有可靠的取消订阅按钮；重复点击仍可能继续发创建请求。
+- 本适配器会在服务端防重复：只要 MSaber 订阅列表、下载中任务或已下载历史中已经存在同一 `tmdbId + season`，就不会再次转发创建请求。
+- 已下载历史只用于“已存在”判断，不会自动删除历史记录或媒体文件。
+- 下载中任务如果 Forward 发起 MoviePilot 风格删除请求，适配器会尝试调用 MSaber 下载删除接口；普通 Forward 订阅按钮通常不会触发这个流程。
+- 本服务不处理资源搜索、下载器代理、站点代理、媒体库整理，只负责 Forward 到 MSaber 的服务器订阅桥接。
 
-## 适合谁用
-
-- 你在用 Forward 看影片详情，希望点“服务器订阅”时把任务发到 MSaber。
-- 你的 MSaber 跑在 NAS、Docker、群晖、绿联、飞牛、Unraid 或其他本地服务器上。
-- 你不想改 Forward 或 MSaber 源码，只想加一个轻量中转服务。
-
-## 快速开始
-
-推荐先用 dry-run 模式跑起来，确认 Forward 会发什么请求，再接入真实 MSaber 接口。
-
-```bash
-git clone git@github.com:wrs0918/forward-msaber-adapter.git
-cd forward-msaber-adapter
-docker compose up -d --build
-```
-
-默认访问地址：
-
-```text
-http://NAS_IP:8088
-```
-
-健康检查：
-
-```bash
-curl http://NAS_IP:8088/health
-```
-
-返回里看到 `success: true` 就说明服务已启动。
-
-## DockerHub 镜像
-
-如果 DockerHub 镜像已经发布，可以不用 clone 仓库，直接在 NAS 上写 compose：
+## Docker Compose
 
 ```yaml
 services:
@@ -68,7 +35,7 @@ services:
     environment:
       PORT: "8080"
       DATA_DIR: "/data"
-      DRY_RUN: "true"
+      DRY_RUN: "false"
       ADAPTER_TOKEN: ""
       MSABER_BASE_URL: "http://你的-msaber-ip:端口"
       MSABER_API_KEY: "替换成你的-msaber-api-key"
@@ -76,6 +43,9 @@ services:
       MSABER_SUBSCRIBE_PATH: "/api/v1/subscribe/save"
       MSABER_DELETE_PATH: "/api/v1/subscribe/delete"
       MSABER_LIST_PATH: "/api/v1/subscribe/page?pageNum=1&pageSize=200"
+      MSABER_DOWNLOADING_PATH: "/api/v1/download/downloading"
+      MSABER_DOWNLOAD_HISTORY_PATH: "/api/v1/download/history?pageNum=1&pageSize=200"
+      MSABER_DOWNLOAD_DELETE_PATH: "/api/v1/download/delete"
       MSABER_REQUEST_TIMEOUT_MS: "10000"
     volumes:
       - ./data:/data
@@ -87,141 +57,71 @@ services:
 docker compose up -d
 ```
 
-镜像地址：
+健康检查：
 
-```text
-docker.io/dawds/forward-msaber-adapter:latest
+```bash
+curl http://NAS_IP:8088/health
 ```
 
-## 在 Forward 里怎么填
+## Forward 里怎么填
 
-在 Forward 的服务器订阅设置里，把这个适配器当成 MoviePilot 服务器地址填进去。
-
-推荐先填：
+在 Forward 的服务器订阅设置里，把服务器地址填成：
 
 ```text
 http://NAS_IP:8088
 ```
 
-如果 Forward 页面里打开了「是否需要登录」，请填任意非空用户名和密码，例如：
+如果 Forward 要求填写账号密码，可以填任意非空值，例如：
 
 ```text
 用户名：msaber
 密码：msaber
 ```
 
-适配器会兼容 MoviePilot 的 `/api/v1/login/access-token`，接受这个登录请求并返回本地 token。这个 token 只用于让 Forward 继续走服务器订阅流程，不会拿去登录 MSaber；MSaber 仍然只通过你配置的 `MSABER_API_KEY` 调用。
-
-如果你设置了 `ADAPTER_TOKEN`，需要确保 Forward 或你的反代能带上下面任意一种请求头：
-
-```text
-Authorization: Bearer 你的-token
-x-adapter-token: 你的-token
-```
-
-如果 Forward 当前界面不能加自定义请求头，建议只在内网使用，或者通过反向代理给请求补 header。
-
-## 第一次使用建议
-
-第一次请保持：
-
-```yaml
-DRY_RUN: "true"
-```
-
-然后在 Forward 里尝试订阅一部电影和一部剧集。适配器会把请求记录到：
-
-```text
-./data/requests.jsonl
-./data/mappings.json
-```
-
-`requests.jsonl` 能看到 Forward 访问了什么路径、传了什么 body。确认字段没问题后，再去配置真实 MSaber 转发。
-
-## 配置真实 MSaber 转发
-
-MSaber 使用 API Key 鉴权。适配器只需要拿到 MSaber 地址和 API Key，就可以调用 MSaber 的订阅接口。
-
-示例配置：
-
-```yaml
-environment:
-  DRY_RUN: "false"
-  MSABER_BASE_URL: "http://192.168.1.20:3000"
-  MSABER_API_KEY: "你的-msaber-api-key"
-  MSABER_API_KEY_HEADER: "apiKey"
-  MSABER_SUBSCRIBE_PATH: "/api/v1/subscribe/save"
-  MSABER_DELETE_PATH: "/api/v1/subscribe/delete"
-```
-
-重启：
-
-```bash
-docker compose up -d
-```
+账号密码不会用于登录 MSaber。MSaber 只通过 `MSABER_API_KEY` 调用。
 
 ## 环境变量
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `PORT` | `8080` | 容器内部监听端口。 |
-| `DATA_DIR` | `/data` | 请求日志和映射文件保存目录。 |
-| `DRY_RUN` | `true` | 只记录请求，不调用 MSaber。第一次使用建议保持 `true`。 |
-| `ADAPTER_TOKEN` | 空 | 可选的适配器访问 token。 |
-| `MSABER_BASE_URL` | 空 | MSaber 服务地址，比如 `http://192.168.1.20:3000`。 |
+| `DATA_DIR` | `/data` | 请求日志目录。 |
+| `DRY_RUN` | `true` | 为 `true` 时只记录请求，不调用 MSaber；正式使用请设为 `false`。 |
+| `ADAPTER_TOKEN` | 空 | 可选访问 token；内网使用可留空。 |
+| `MSABER_BASE_URL` | 空 | MSaber 服务地址，例如 `http://192.168.1.20:3001`。 |
 | `MSABER_API_KEY` | 空 | MSaber API Key。 |
-| `MSABER_API_KEY_HEADER` | `apiKey` | 发送 API Key 使用的请求头名。 |
-| `MSABER_SUBSCRIBE_PATH` | `/api/v1/subscribe/save` | MSaber 新增订阅接口路径。 |
-| `MSABER_DELETE_PATH` | `/api/v1/subscribe/delete` | MSaber 删除或取消订阅接口路径。 |
-| `MSABER_LIST_PATH` | `/api/v1/subscribe/page?pageNum=1&pageSize=200` | MSaber 订阅列表接口，用于给 Forward 查询已有订阅。 |
-| `MSABER_REQUEST_TIMEOUT_MS` | `10000` | 调用 MSaber 的超时时间，单位毫秒。 |
+| `MSABER_API_KEY_HEADER` | `apiKey` | API Key 请求头名。 |
+| `MSABER_SUBSCRIBE_PATH` | `/api/v1/subscribe/save` | MSaber 新增订阅接口。 |
+| `MSABER_DELETE_PATH` | `/api/v1/subscribe/delete` | MSaber 删除订阅接口前缀。 |
+| `MSABER_LIST_PATH` | `/api/v1/subscribe/page?pageNum=1&pageSize=200` | MSaber 订阅列表接口。 |
+| `MSABER_DOWNLOADING_PATH` | `/api/v1/download/downloading` | MSaber 下载中任务接口。 |
+| `MSABER_DOWNLOAD_HISTORY_PATH` | `/api/v1/download/history?pageNum=1&pageSize=200` | MSaber 已下载历史接口。 |
+| `MSABER_DOWNLOAD_DELETE_PATH` | `/api/v1/download/delete` | MSaber 下载任务删除接口前缀。 |
+| `MSABER_REQUEST_TIMEOUT_MS` | `10000` | 调用 MSaber 超时时间，单位毫秒。 |
 
-## Forward 查订阅列表是做什么的
+## 状态与防重复
 
-Forward 在订阅前或打开服务器订阅页面时，会先访问：
-
-```text
-GET /api/v1/subscribe/user/
-```
-
-这个请求通常用于同步服务器已有订阅，避免重复订阅，也可能用于显示“这部影片是否已经在服务器订阅中”。适配器会把它转成 MSaber 的订阅列表查询：
+Forward 会访问这些 MoviePilot 风格接口：
 
 ```text
-GET /api/v1/subscribe/page?pageNum=1&pageSize=200
+GET  /api/v1/subscribe/user/
+GET  /api/v1/subscribe/media/tmdb:{tmdbId}?season={season}
+POST /api/v1/subscribe/
 ```
 
-然后把 MSaber 返回的 `id/name/type/year/tmdbId/season/startEpisode` 等字段转换成 Forward / MoviePilot 常见字段，比如 `tmdbid`、`tmdb_id`、`mediaid`、`season_number`。如果 MSaber 暂时不可用，适配器会返回空列表并在容器日志里写 warning，避免 Forward 直接卡死。
+适配器会把 MSaber 的以下状态转换成 MoviePilot 风格对象返回给 Forward：
 
-## 已兼容的字段
+- MSaber 订阅列表：视为已订阅。
+- MSaber 下载中任务：视为已存在。
+- MSaber 已下载历史：视为已存在。
 
-适配器会尽量从 Forward / MoviePilot 风格 payload 里提取这些字段：
+当 Forward 发起 `POST /api/v1/subscribe/` 时，适配器会先查 MSaber 状态。如果已经存在同一媒体，会返回 `Subscription already exists`，不会调用 MSaber 创建接口。
 
-```text
-title, name, cn_name, original_title,
-year, release_year,
-type, media_type, mediaType, category,
-tmdbid, tmdb_id, tmdbId, tmdb,
-imdbid, imdb_id, imdbId, imdb,
-season, season_number, seasonNumber,
-episode, episode_number, episodeNumber,
-poster, poster_path, backdrop, cover, image
-```
+## 安全建议
 
-最终会转换成 MSaber `/api/v1/subscribe/save` 需要的订阅结构，并自动合并 MSaber 的默认电影/剧集订阅配置：
-
-```json
-{
-  "name": "权力的游戏",
-  "year": 2011,
-  "type": "tv",
-  "tmdbId": 1399,
-  "season": 1,
-  "startEpisode": 1,
-  "episodes": null
-}
-```
-
-MSaber API Key 会通过 `apiKey` 请求头发送。
+- 建议只在内网使用，不要直接暴露公网。
+- 如果必须公网访问，请配置 `ADAPTER_TOKEN`，并放在 HTTPS 反向代理后面。
+- 不要把真实 `.env`、API Key、请求日志提交到公开仓库。
 
 ## 本地开发
 
@@ -231,59 +131,17 @@ node --check server.js
 PORT=8099 DATA_DIR=/tmp/forward-msaber-adapter DRY_RUN=true node server.js
 ```
 
-测试：
+## 镜像
 
-```bash
-curl http://127.0.0.1:8099/health
-curl -X POST http://127.0.0.1:8099/api/v1/subscribe \
-  -H 'Content-Type: application/json' \
-  -d '{"title":"权力的游戏","type":"tv","tmdb_id":"1399","season":1,"year":"2011"}'
+```text
+docker.io/dawds/forward-msaber-adapter:latest
 ```
 
-## 构建和推送 Docker 镜像
-
-本地构建：
+多架构发布命令：
 
 ```bash
-docker build -t forward-msaber-adapter:test .
-```
-
-发布到 DockerHub：
-
-```bash
-docker login
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
   -t dawds/forward-msaber-adapter:latest \
-  -t dawds/forward-msaber-adapter:0.2.2 \
   --push .
 ```
-
-如果只想推当前 Mac 架构的普通镜像：
-
-```bash
-docker build -t dawds/forward-msaber-adapter:latest .
-docker push dawds/forward-msaber-adapter:latest
-```
-
-NAS 一般建议使用上面的多架构 `buildx` 发布方式，这样 x86 NAS 和 ARM NAS 都能拉。
-
-## 常见问题
-
-### 为什么默认不开启真实转发？
-
-因为不同 MSaber 版本的订阅接口可能不一样。默认 `DRY_RUN=true` 能先安全记录 Forward 请求，避免一上来就把错误请求打到 MSaber。
-
-### Forward 订阅后没有进入 MSaber 怎么办？
-
-先检查：
-
-- `docker logs forward-msaber-adapter`
-- `./data/requests.jsonl`
-- `MSABER_BASE_URL` 是否能从容器访问
-- `MSABER_API_KEY_HEADER` 是否和你的 MSaber 要求一致
-- `MSABER_SUBSCRIBE_PATH` 是否是你抓包得到的真实路径
-
-### 可以公网暴露吗？
-
-不建议直接裸露公网。如果必须公网访问，请至少配置 `ADAPTER_TOKEN`，并放在 HTTPS 反向代理后面。
