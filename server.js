@@ -11,6 +11,8 @@ const config = {
   msaberApiKeyHeader: process.env.MSABER_API_KEY_HEADER || "apiKey",
   msaberSubscribePath: process.env.MSABER_SUBSCRIBE_PATH || "/api/v1/subscribe/save",
   msaberDeletePath: process.env.MSABER_DELETE_PATH || "/api/v1/subscribe/delete",
+  msaberListPath: process.env.MSABER_LIST_PATH || "/api/v1/subscribe/page?pageNum=1&pageSize=200",
+  msaberRequestTimeoutMs: Number(process.env.MSABER_REQUEST_TIMEOUT_MS || 10000),
   dryRun: parseBoolean(process.env.DRY_RUN, true)
 };
 
@@ -49,13 +51,32 @@ const server = http.createServer(async (request, response) => {
       });
     }
 
-    if (request.method === "GET" && /^\/api\/v1\/subscribe\/user\/?$/.test(parsedUrl.pathname)) {
-      return sendJson(response, 200, moviePilotOk({
-        id: 1,
-        name: "MSaber",
-        username: "msaber",
-        nickname: "MSaber"
-      }));
+    if (request.method === "GET" && /^\/api\/v1\/user\/?$/.test(parsedUrl.pathname)) {
+      return sendJson(response, 200, [moviePilotUser()]);
+    }
+
+    if (request.method === "GET" && /^\/api\/v1\/user\/current\/?$/.test(parsedUrl.pathname)) {
+      return sendJson(response, 200, moviePilotUser());
+    }
+
+    if (request.method === "GET" && /^\/api\/v1\/subscribe\/(list)?\/?$/.test(parsedUrl.pathname)) {
+      return handleSubscribeList(response);
+    }
+
+    if (request.method === "GET" && /^\/api\/v1\/subscribe\/user(\/[^/]+)?\/?$/.test(parsedUrl.pathname)) {
+      return handleSubscribeList(response);
+    }
+
+    if (request.method === "GET" && /^\/api\/v1\/subscribe\/media\/[^/]+\/?$/.test(parsedUrl.pathname)) {
+      return handleSubscribeLookup(parsedUrl.pathname, response);
+    }
+
+    if (request.method === "DELETE" && /^\/api\/v1\/subscribe\/media\/[^/]+\/?$/.test(parsedUrl.pathname)) {
+      return sendJson(response, 200, moviePilotOk(true, "Deleted"));
+    }
+
+    if (request.method === "GET" && /^\/api\/v1\/subscribe\/(check|search|refresh)\/?$/.test(parsedUrl.pathname)) {
+      return sendJson(response, 200, moviePilotOk(true, "Accepted"));
     }
 
     if (isSubscribePath(parsedUrl.pathname, request.method)) {
@@ -147,6 +168,20 @@ function moviePilotOk(data = null, message = "success") {
   };
 }
 
+function moviePilotUser() {
+  return {
+    id: 1,
+    name: "msaber",
+    email: null,
+    is_active: true,
+    is_superuser: true,
+    avatar: null,
+    is_otp: false,
+    permissions: {},
+    settings: {}
+  };
+}
+
 function isSubscribePath(pathname, method) {
   if (!["POST", "PUT"].includes(method || "")) return false;
   return /subscribe|subscription|download|task|media/i.test(pathname);
@@ -199,6 +234,88 @@ async function handleDelete(requestInfo, response) {
     dryRun: config.dryRun,
     msaber: msaberResult
   }, config.dryRun ? "Dry run deletion recorded" : "Deletion forwarded"));
+}
+
+async function handleSubscribeList(response) {
+  const items = await getMoviePilotSubscriptions();
+  return sendJson(response, 200, items);
+}
+
+async function handleSubscribeLookup(pathname, response) {
+  const mediaId = decodeURIComponent(pathname.replace(/^\/api\/v1\/subscribe\/media\//, "").replace(/\/$/, ""));
+  const items = await getMoviePilotSubscriptions();
+  const found = items.find(item => {
+    const candidates = [item.id, item.mediaid, item.media_id, item.tmdbid, item.tmdb_id, item.tmdbId];
+    return candidates.some(value => String(value || "") === mediaId);
+  });
+  return sendJson(response, 200, found || null);
+}
+
+async function getMoviePilotSubscriptions() {
+  if (config.dryRun || !isMsaberConfigured()) {
+    return Object.values(readMappings()).map(entry => toMoviePilotSubscribe(entry.forward, entry.msaber?.body?.data || entry.msaber?.body));
+  }
+
+  try {
+    const result = await requestMsaber(config.msaberListPath);
+    if (!result.ok) {
+      console.warn(`MSaber subscribe list request failed: ${result.status}`);
+      return [];
+    }
+    return extractMsaberList(result.body).map(item => toMoviePilotSubscribe(item));
+  } catch (error) {
+    console.warn(`MSaber subscribe list request error: ${error.message || error}`);
+    return [];
+  }
+}
+
+function extractMsaberList(body) {
+  const candidates = [
+    body?.data?.list,
+    body?.data?.records,
+    body?.data?.items,
+    body?.data,
+    body?.list,
+    body?.records,
+    body?.items,
+    body
+  ];
+  const list = candidates.find(Array.isArray);
+  return list || [];
+}
+
+function toMoviePilotSubscribe(item = {}, fallback = {}) {
+  const tmdbMedia = item.tmdbMedia || item.tmdb_media || fallback.tmdbMedia || {};
+  const type = normalizeMediaType(item.type || item.media_type || item.mediaType || fallback.type || tmdbMedia.type);
+  const tmdbId = firstText(item.tmdbId, item.tmdbid, item.tmdb_id, item.mediaid, item.media_id, fallback.tmdbId, tmdbMedia.id);
+  const id = firstText(item.id, item.subscribeId, item.rssId, fallback.id, tmdbId);
+  const name = firstText(item.name, item.title, item.keyword, fallback.name, fallback.title, tmdbMedia.title, tmdbMedia.name);
+  const season = firstText(item.season, item.seasonNumber, item.season_number, fallback.season);
+
+  return {
+    id: toNumberOrMaybeString(id),
+    name,
+    title: name,
+    year: toNumberOrNull(firstText(item.year, item.releaseYear, item.release_year, fallback.year, tmdbMedia.year)),
+    type: type === "movie" ? "movie" : "tv",
+    tmdbid: toNumberOrMaybeString(tmdbId),
+    tmdb_id: toNumberOrMaybeString(tmdbId),
+    tmdbId: toNumberOrMaybeString(tmdbId),
+    imdbid: firstText(item.imdbId, item.imdbid, item.imdb_id, fallback.imdbId, tmdbMedia.imdbId),
+    mediaid: toNumberOrMaybeString(firstText(item.mediaid, item.media_id, tmdbId)),
+    media_id: toNumberOrMaybeString(firstText(item.media_id, item.mediaid, tmdbId)),
+    season: toNumberOrNull(season),
+    season_number: toNumberOrNull(season),
+    start_episode: toNumberOrNull(firstText(item.startEpisode, item.start_episode, fallback.episode)),
+    episode: toNumberOrNull(firstText(item.episode, item.startEpisode, fallback.episode)),
+    status: firstText(item.status, fallback.status) || null,
+    username: "msaber",
+    user: "msaber",
+    poster: firstText(item.poster, item.posterPath, item.poster_path, item.cover, fallback.poster, tmdbMedia.poster),
+    backdrop: firstText(item.backdrop, item.backdropPath, item.backdrop_path, tmdbMedia.backdrop),
+    overview: firstText(item.overview, item.description, item.desc, fallback.overview, tmdbMedia.overview),
+    raw: item
+  };
 }
 
 function isProbePayload(payload) {
@@ -293,17 +410,24 @@ async function requestMsaber(targetPath, options = {}) {
     if (config.msaberApiKey) headers[config.msaberApiKeyHeader] = config.msaberApiKey;
   }
 
-  const response = await fetch(url, {
-    method: options.method || "GET",
-    headers,
-    body: options.body === undefined ? undefined : JSON.stringify(options.body)
-  });
-  const text = await response.text();
-  return {
-    status: response.status,
-    ok: response.ok,
-    body: parseMaybeJson(text) ?? text
-  };
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), config.msaberRequestTimeoutMs);
+  try {
+    const response = await fetch(url, {
+      method: options.method || "GET",
+      headers,
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      signal: controller.signal
+    });
+    const text = await response.text();
+    return {
+      status: response.status,
+      ok: response.ok,
+      body: parseMaybeJson(text) ?? text
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function getDefaultSubscribeConfig(type) {
@@ -350,6 +474,13 @@ async function toMsaberPayload(payload) {
 function toNumberOrNull(value) {
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function toNumberOrMaybeString(value) {
+  const text = String(value || "").trim();
+  if (!text) return null;
+  const number = Number(text);
+  return Number.isFinite(number) && String(number) === text ? number : text;
 }
 
 function toNumberOrDefault(value, defaultValue) {

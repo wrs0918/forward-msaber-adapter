@@ -19,6 +19,7 @@ Forward 官方的服务器订阅功能主要按 MoviePilot 的接口设计。如
 - 兼容常见 MoviePilot / Forward 字段，比如 `title`、`tmdb_id`、`season`、`type`、`year`。
 - 默认以 `DRY_RUN=true` 运行，只记录请求不真正调用 MSaber，方便先摸清 Forward 和 MSaber 的请求格式。
 - 配好 MSaber 地址、API Key 和订阅接口后，把请求转发给 MSaber。
+- Forward 查询 `/api/v1/subscribe/user/` 时，实时读取 MSaber 已有订阅并转换成 MoviePilot 风格列表，帮助 Forward 判断“已订阅 / 避免重复订阅”。
 - 保存请求日志和订阅映射，方便排查问题。
 - 自动识别 Forward 的联通测试请求，比如 `{"tmdbid":"-1"}`，这类请求只返回成功，不会转发到 MSaber。
 
@@ -74,6 +75,8 @@ services:
       MSABER_API_KEY_HEADER: "apiKey"
       MSABER_SUBSCRIBE_PATH: "/api/v1/subscribe/save"
       MSABER_DELETE_PATH: "/api/v1/subscribe/delete"
+      MSABER_LIST_PATH: "/api/v1/subscribe/page?pageNum=1&pageSize=200"
+      MSABER_REQUEST_TIMEOUT_MS: "10000"
     volumes:
       - ./data:/data
 ```
@@ -161,6 +164,24 @@ docker compose up -d
 | `MSABER_API_KEY_HEADER` | `apiKey` | 发送 API Key 使用的请求头名。 |
 | `MSABER_SUBSCRIBE_PATH` | `/api/v1/subscribe/save` | MSaber 新增订阅接口路径。 |
 | `MSABER_DELETE_PATH` | `/api/v1/subscribe/delete` | MSaber 删除或取消订阅接口路径。 |
+| `MSABER_LIST_PATH` | `/api/v1/subscribe/page?pageNum=1&pageSize=200` | MSaber 订阅列表接口，用于给 Forward 查询已有订阅。 |
+| `MSABER_REQUEST_TIMEOUT_MS` | `10000` | 调用 MSaber 的超时时间，单位毫秒。 |
+
+## Forward 查订阅列表是做什么的
+
+Forward 在订阅前或打开服务器订阅页面时，会先访问：
+
+```text
+GET /api/v1/subscribe/user/
+```
+
+这个请求通常用于同步服务器已有订阅，避免重复订阅，也可能用于显示“这部影片是否已经在服务器订阅中”。适配器会把它转成 MSaber 的订阅列表查询：
+
+```text
+GET /api/v1/subscribe/page?pageNum=1&pageSize=200
+```
+
+然后把 MSaber 返回的 `id/name/type/year/tmdbId/season/startEpisode` 等字段转换成 Forward / MoviePilot 常见字段，比如 `tmdbid`、`tmdb_id`、`mediaid`、`season_number`。如果 MSaber 暂时不可用，适配器会返回空列表并在容器日志里写 warning，避免 Forward 直接卡死。
 
 ## 已兼容的字段
 
@@ -225,7 +246,7 @@ docker login
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
   -t dawds/forward-msaber-adapter:latest \
-  -t dawds/forward-msaber-adapter:0.2.0 \
+  -t dawds/forward-msaber-adapter:0.2.1 \
   --push .
 ```
 

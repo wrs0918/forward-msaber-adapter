@@ -18,5 +18,7 @@ services:
       MSABER_API_KEY_HEADER: "${MSABER_API_KEY_HEADER:-apiKey}"
       MSABER_SUBSCRIBE_PATH: "${MSABER_SUBSCRIBE_PATH:-/api/v1/subscribe/save}"
       MSABER_DELETE_PATH: "${MSABER_DELETE_PATH:-/api/v1/subscribe/delete}"
+      MSABER_LIST_PATH: "${MSABER_LIST_PATH:-/api/v1/subscribe/page?pageNum=1&pageSize=200}"
+      MSABER_REQUEST_TIMEOUT_MS: "${MSABER_REQUEST_TIMEOUT_MS:-10000}"
     volumes:
       - ./data:/data
