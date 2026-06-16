@@ -51,11 +51,27 @@ const server = http.createServer(async (request, response) => {
       });
     }
 
+    if (request.method === "POST" && /^\/api\/v1\/login\/access-token\/?$/.test(parsedUrl.pathname)) {
+      return sendJson(response, 200, moviePilotToken());
+    }
+
+    if (request.method === "GET" && /^\/api\/v1\/system\/global\/user\/?$/.test(parsedUrl.pathname)) {
+      return sendJson(response, 200, moviePilotOk(moviePilotUser(), "success"));
+    }
+
     if (request.method === "GET" && /^\/api\/v1\/user\/?$/.test(parsedUrl.pathname)) {
       return sendJson(response, 200, [moviePilotUser()]);
     }
 
     if (request.method === "GET" && /^\/api\/v1\/user\/current\/?$/.test(parsedUrl.pathname)) {
+      return sendJson(response, 200, moviePilotUser());
+    }
+
+    if (request.method === "GET" && /^\/api\/v1\/user\/(name|id)\/[^/]+\/?$/.test(parsedUrl.pathname)) {
+      return sendJson(response, 200, moviePilotUser());
+    }
+
+    if (request.method === "GET" && /^\/api\/v1\/user\/[^/]+\/?$/.test(parsedUrl.pathname)) {
       return sendJson(response, 200, moviePilotUser());
     }
 
@@ -75,8 +91,24 @@ const server = http.createServer(async (request, response) => {
       return sendJson(response, 200, moviePilotOk(true, "Deleted"));
     }
 
+    if (request.method === "GET" && /^\/api\/v1\/subscribe\/status\/[^/]+\/?$/.test(parsedUrl.pathname)) {
+      return sendJson(response, 200, moviePilotOk({ state: "R", status: "running" }, "success"));
+    }
+
     if (request.method === "GET" && /^\/api\/v1\/subscribe\/(check|search|refresh)\/?$/.test(parsedUrl.pathname)) {
       return sendJson(response, 200, moviePilotOk(true, "Accepted"));
+    }
+
+    if (request.method === "GET" && /^\/api\/v1\/mediaserver\/(exists|exists_remote|notexists)\/?$/.test(parsedUrl.pathname)) {
+      return sendJson(response, 200, moviePilotOk(false, "success"));
+    }
+
+    if (request.method === "GET" && /^\/api\/v1\/media\/\d+\/?$/.test(parsedUrl.pathname)) {
+      return sendJson(response, 200, null);
+    }
+
+    if (request.method === "GET" && /^\/api\/v1\/search\/media\/[^/]+\/?$/.test(parsedUrl.pathname)) {
+      return sendJson(response, 200, null);
     }
 
     if (isSubscribePath(parsedUrl.pathname, request.method)) {
@@ -179,6 +211,20 @@ function moviePilotUser() {
     is_otp: false,
     permissions: {},
     settings: {}
+  };
+}
+
+function moviePilotToken() {
+  return {
+    access_token: "forward-msaber-adapter",
+    token_type: "bearer",
+    super_user: true,
+    user_id: 1,
+    user_name: "msaber",
+    avatar: null,
+    level: 1,
+    permissions: {},
+    wizard: false
   };
 }
 

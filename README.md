@@ -103,6 +103,15 @@ docker.io/dawds/forward-msaber-adapter:latest
 http://NAS_IP:8088
 ```
 
+如果 Forward 页面里打开了「是否需要登录」，请填任意非空用户名和密码，例如：
+
+```text
+用户名：msaber
+密码：msaber
+```
+
+适配器会兼容 MoviePilot 的 `/api/v1/login/access-token`，接受这个登录请求并返回本地 token。这个 token 只用于让 Forward 继续走服务器订阅流程，不会拿去登录 MSaber；MSaber 仍然只通过你配置的 `MSABER_API_KEY` 调用。
+
 如果你设置了 `ADAPTER_TOKEN`，需要确保 Forward 或你的反代能带上下面任意一种请求头：
 
 ```text
@@ -246,7 +255,7 @@ docker login
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
   -t dawds/forward-msaber-adapter:latest \
-  -t dawds/forward-msaber-adapter:0.2.1 \
+  -t dawds/forward-msaber-adapter:0.2.2 \
   --push .
 ```
 
