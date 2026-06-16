@@ -1,5 +1,6 @@
 services:
   forward-msaber-adapter:
+    image: wrs0918/forward-msaber-adapter:latest
     build: .
     container_name: forward-msaber-adapter
     restart: unless-stopped
