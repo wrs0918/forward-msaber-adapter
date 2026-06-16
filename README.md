@@ -58,7 +58,7 @@ curl http://NAS_IP:8088/health
 ```yaml
 services:
   forward-msaber-adapter:
-    image: wrs0918/forward-msaber-adapter:latest
+    image: dawds/forward-msaber-adapter:latest
     container_name: forward-msaber-adapter
     restart: unless-stopped
     ports:
@@ -86,7 +86,7 @@ docker compose up -d
 镜像地址：
 
 ```text
-docker.io/wrs0918/forward-msaber-adapter:latest
+docker.io/dawds/forward-msaber-adapter:latest
 ```
 
 ## 在 Forward 里怎么填
@@ -234,16 +234,16 @@ docker build -t forward-msaber-adapter:test .
 docker login
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  -t wrs0918/forward-msaber-adapter:latest \
-  -t wrs0918/forward-msaber-adapter:0.1.0 \
+  -t dawds/forward-msaber-adapter:latest \
+  -t dawds/forward-msaber-adapter:0.1.0 \
   --push .
 ```
 
 如果只想推当前 Mac 架构的普通镜像：
 
 ```bash
-docker build -t wrs0918/forward-msaber-adapter:latest .
-docker push wrs0918/forward-msaber-adapter:latest
+docker build -t dawds/forward-msaber-adapter:latest .
+docker push dawds/forward-msaber-adapter:latest
 ```
 
 NAS 一般建议使用上面的多架构 `buildx` 发布方式，这样 x86 NAS 和 ARM NAS 都能拉。
