@@ -20,6 +20,7 @@ Forward 官方的服务器订阅功能主要按 MoviePilot 的接口设计。如
 - 默认以 `DRY_RUN=true` 运行，只记录请求不真正调用 MSaber，方便先摸清 Forward 和 MSaber 的请求格式。
 - 配好 MSaber 地址、API Key 和订阅接口后，把请求转发给 MSaber。
 - 保存请求日志和订阅映射，方便排查问题。
+- 自动识别 Forward 的联通测试请求，比如 `{"tmdbid":"-1"}`，这类请求只返回成功，不会转发到 MSaber。
 
 ## 适合谁用
 
@@ -71,8 +72,8 @@ services:
       MSABER_BASE_URL: "http://你的-msaber-ip:端口"
       MSABER_API_KEY: "替换成你的-msaber-api-key"
       MSABER_API_KEY_HEADER: "apiKey"
-      MSABER_SUBSCRIBE_PATH: ""
-      MSABER_DELETE_PATH: ""
+      MSABER_SUBSCRIBE_PATH: "/api/v1/subscribe/save"
+      MSABER_DELETE_PATH: "/api/v1/subscribe/delete"
     volumes:
       - ./data:/data
 ```
@@ -127,17 +128,7 @@ DRY_RUN: "true"
 
 ## 配置真实 MSaber 转发
 
-MSaber 的公开文档没有稳定说明所有版本的“新增订阅 / 删除订阅”接口路径，所以建议先用浏览器抓一次你自己 MSaber 的真实接口。
-
-步骤：
-
-1. 打开 MSaber Web UI。
-2. 打开浏览器开发者工具的 Network 面板。
-3. 在 MSaber 页面手动新增一个电影订阅。
-4. 找到新增订阅对应的请求路径和 JSON body。
-5. 把请求路径填到 `MSABER_SUBSCRIBE_PATH`。
-6. 再手动取消一个订阅，找到删除路径，填到 `MSABER_DELETE_PATH`。
-7. 把 `DRY_RUN` 改成 `false`，重启服务。
+MSaber 使用 API Key 鉴权。适配器只需要拿到 MSaber 地址和 API Key，就可以调用 MSaber 的订阅接口。
 
 示例配置：
 
@@ -147,8 +138,8 @@ environment:
   MSABER_BASE_URL: "http://192.168.1.20:3000"
   MSABER_API_KEY: "你的-msaber-api-key"
   MSABER_API_KEY_HEADER: "apiKey"
-  MSABER_SUBSCRIBE_PATH: "/api/你的新增订阅路径"
-  MSABER_DELETE_PATH: "/api/你的删除订阅路径"
+  MSABER_SUBSCRIBE_PATH: "/api/v1/subscribe/save"
+  MSABER_DELETE_PATH: "/api/v1/subscribe/delete"
 ```
 
 重启：
@@ -168,8 +159,8 @@ docker compose up -d
 | `MSABER_BASE_URL` | 空 | MSaber 服务地址，比如 `http://192.168.1.20:3000`。 |
 | `MSABER_API_KEY` | 空 | MSaber API Key。 |
 | `MSABER_API_KEY_HEADER` | `apiKey` | 发送 API Key 使用的请求头名。 |
-| `MSABER_SUBSCRIBE_PATH` | 空 | MSaber 新增订阅接口路径。 |
-| `MSABER_DELETE_PATH` | 空 | MSaber 删除或取消订阅接口路径。 |
+| `MSABER_SUBSCRIBE_PATH` | `/api/v1/subscribe/save` | MSaber 新增订阅接口路径。 |
+| `MSABER_DELETE_PATH` | `/api/v1/subscribe/delete` | MSaber 删除或取消订阅接口路径。 |
 
 ## 已兼容的字段
 
@@ -186,22 +177,21 @@ episode, episode_number, episodeNumber,
 poster, poster_path, backdrop, cover, image
 ```
 
-最终会转换成发给 MSaber 的通用结构：
+最终会转换成 MSaber `/api/v1/subscribe/save` 需要的订阅结构，并自动合并 MSaber 的默认电影/剧集订阅配置：
 
 ```json
 {
-  "title": "权力的游戏",
-  "year": "2011",
+  "name": "权力的游戏",
+  "year": 2011,
   "type": "tv",
-  "tmdbid": "1399",
-  "imdbid": "",
-  "season": "1",
-  "episode": "",
-  "poster": ""
+  "tmdbId": 1399,
+  "season": 1,
+  "startEpisode": 1,
+  "episodes": null
 }
 ```
 
-如果你的 MSaber 接口需要不同字段名，可以改 `server.js` 里的 `toMsaberPayload()`。
+MSaber API Key 会通过 `apiKey` 请求头发送。
 
 ## 本地开发
 
@@ -235,7 +225,7 @@ docker login
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
   -t dawds/forward-msaber-adapter:latest \
-  -t dawds/forward-msaber-adapter:0.1.0 \
+  -t dawds/forward-msaber-adapter:0.2.0 \
   --push .
 ```
 

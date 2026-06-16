@@ -7,17 +7,16 @@ services:
     ports:
       - "8088:8080"
     environment:
-      PORT: "8080"
-      DATA_DIR: "/data"
+      PORT: "${PORT:-8080}"
+      DATA_DIR: "${DATA_DIR:-/data}"
       # Optional. Set this if you expose the adapter outside your LAN.
-      ADAPTER_TOKEN: ""
+      ADAPTER_TOKEN: "${ADAPTER_TOKEN:-}"
       # Keep DRY_RUN=true first. The adapter will log Forward requests without calling MSaber.
-      DRY_RUN: "true"
-      MSABER_BASE_URL: "http://msaber:3000"
-      MSABER_API_KEY: "replace-with-your-msaber-api-key"
-      MSABER_API_KEY_HEADER: "apiKey"
-      # Fill these after confirming MSaber's real subscription endpoints from browser DevTools.
-      MSABER_SUBSCRIBE_PATH: ""
-      MSABER_DELETE_PATH: ""
+      DRY_RUN: "${DRY_RUN:-true}"
+      MSABER_BASE_URL: "${MSABER_BASE_URL:-http://msaber:3000}"
+      MSABER_API_KEY: "${MSABER_API_KEY:-replace-with-your-msaber-api-key}"
+      MSABER_API_KEY_HEADER: "${MSABER_API_KEY_HEADER:-apiKey}"
+      MSABER_SUBSCRIBE_PATH: "${MSABER_SUBSCRIBE_PATH:-/api/v1/subscribe/save}"
+      MSABER_DELETE_PATH: "${MSABER_DELETE_PATH:-/api/v1/subscribe/delete}"
     volumes:
       - ./data:/data

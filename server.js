@@ -9,8 +9,8 @@ const config = {
   msaberBaseUrl: trimSlash(process.env.MSABER_BASE_URL || ""),
   msaberApiKey: process.env.MSABER_API_KEY || "",
   msaberApiKeyHeader: process.env.MSABER_API_KEY_HEADER || "apiKey",
-  msaberSubscribePath: process.env.MSABER_SUBSCRIBE_PATH || "",
-  msaberDeletePath: process.env.MSABER_DELETE_PATH || "",
+  msaberSubscribePath: process.env.MSABER_SUBSCRIBE_PATH || "/api/v1/subscribe/save",
+  msaberDeletePath: process.env.MSABER_DELETE_PATH || "/api/v1/subscribe/delete",
   dryRun: parseBoolean(process.env.DRY_RUN, true)
 };
 
@@ -41,11 +41,21 @@ const server = http.createServer(async (request, response) => {
     if (request.method === "GET" && ["/", "/health", "/api/v1/system/status"].includes(parsedUrl.pathname)) {
       return sendJson(response, 200, {
         success: true,
+        code: 0,
         status: "ok",
         service: "forward-msaber-adapter",
         dryRun: config.dryRun,
-        msaberConfigured: Boolean(config.msaberBaseUrl && config.msaberApiKey)
+        msaberConfigured: isMsaberConfigured()
       });
+    }
+
+    if (request.method === "GET" && /^\/api\/v1\/subscribe\/user\/?$/.test(parsedUrl.pathname)) {
+      return sendJson(response, 200, moviePilotOk({
+        id: 1,
+        name: "MSaber",
+        username: "msaber",
+        nickname: "MSaber"
+      }));
     }
 
     if (isSubscribePath(parsedUrl.pathname, request.method)) {
@@ -128,6 +138,15 @@ function sendJson(response, statusCode, payload) {
   response.end(JSON.stringify(payload));
 }
 
+function moviePilotOk(data = null, message = "success") {
+  return {
+    success: true,
+    code: 0,
+    message,
+    data
+  };
+}
+
 function isSubscribePath(pathname, method) {
   if (!["POST", "PUT"].includes(method || "")) return false;
   return /subscribe|subscription|download|task|media/i.test(pathname);
@@ -140,6 +159,16 @@ function isDeletePath(pathname, method) {
 
 async function handleSubscribe(requestInfo, response) {
   const normalized = normalizeForwardPayload(requestInfo.body, requestInfo.query);
+
+  if (isProbePayload(normalized)) {
+    return sendJson(response, 200, moviePilotOk({
+      id: "probe",
+      dryRun: config.dryRun,
+      forwarded: false,
+      reason: "probe-or-empty-payload"
+    }, "Probe accepted"));
+  }
+
   const adapterId = buildMappingKey(normalized);
   const msaberResult = await forwardToMsaber("subscribe", normalized);
 
@@ -150,16 +179,11 @@ async function handleSubscribe(requestInfo, response) {
     msaber: msaberResult
   });
 
-  return sendJson(response, 200, {
-    success: true,
-    code: 0,
-    message: config.dryRun ? "Dry run subscription recorded" : "Subscription forwarded",
-    data: {
-      id: adapterId,
-      dryRun: config.dryRun,
-      msaber: msaberResult
-    }
-  });
+  return sendJson(response, 200, moviePilotOk({
+    id: adapterId,
+    dryRun: config.dryRun,
+    msaber: msaberResult
+  }, config.dryRun ? "Dry run subscription recorded" : "Subscription forwarded"));
 }
 
 async function handleDelete(requestInfo, response) {
@@ -170,33 +194,34 @@ async function handleDelete(requestInfo, response) {
   delete mappings[adapterId];
   writeMappings(mappings);
 
-  return sendJson(response, 200, {
-    success: true,
-    code: 0,
-    message: config.dryRun ? "Dry run deletion recorded" : "Deletion forwarded",
-    data: {
-      id: adapterId,
-      dryRun: config.dryRun,
-      msaber: msaberResult
-    }
-  });
+  return sendJson(response, 200, moviePilotOk({
+    id: adapterId,
+    dryRun: config.dryRun,
+    msaber: msaberResult
+  }, config.dryRun ? "Dry run deletion recorded" : "Deletion forwarded"));
+}
+
+function isProbePayload(payload) {
+  const tmdbId = String(payload.tmdbId || "").trim();
+  return !payload.title && (!tmdbId || tmdbId === "-1");
 }
 
 function normalizeForwardPayload(body, query) {
   const source = Object.assign({}, query || {}, body && typeof body === "object" ? body : {});
-  const media = source.media || source.item || source.data || {};
+  const media = source.media || source.item || source.data || source.detail || {};
   const merged = Object.assign({}, source, media);
   const type = normalizeMediaType(merged.type || merged.media_type || merged.mediaType || merged.category);
 
   return {
-    title: firstText(merged.title, merged.name, merged.cn_name, merged.original_title),
-    year: firstText(merged.year, merged.release_year),
+    title: firstText(merged.title, merged.name, merged.cn_name, merged.original_title, merged.originalTitle),
+    year: firstText(merged.year, merged.release_year, merged.releaseYear, merged.premiereDate, merged.releaseDate).slice(0, 4),
     type,
     tmdbId: firstText(merged.tmdbid, merged.tmdb_id, merged.tmdbId, merged.tmdb),
     imdbId: firstText(merged.imdbid, merged.imdb_id, merged.imdbId, merged.imdb),
     season: firstText(merged.season, merged.season_number, merged.seasonNumber),
     episode: firstText(merged.episode, merged.episode_number, merged.episodeNumber),
-    poster: firstText(merged.poster, merged.poster_path, merged.backdrop, merged.cover, merged.image),
+    poster: firstText(merged.poster, merged.poster_path, merged.posterPath, merged.backdrop, merged.cover, merged.image),
+    overview: firstText(merged.overview, merged.description, merged.desc, merged.summary),
     raw: source
   };
 }
@@ -210,7 +235,7 @@ function firstText(...values) {
 
 function normalizeMediaType(value) {
   const text = String(value || "").toLowerCase();
-  if (["tv", "series", "show", "电视剧", "剧集"].includes(text)) return "tv";
+  if (["tv", "series", "show", "电视剧", "剧集", "anime", "animation", "dongman"].includes(text)) return "tv";
   if (["movie", "film", "电影"].includes(text)) return "movie";
   return text || "unknown";
 }
@@ -220,40 +245,116 @@ function buildMappingKey(payload) {
 }
 
 async function forwardToMsaber(action, payload) {
-  const targetPath = action === "delete" ? config.msaberDeletePath : config.msaberSubscribePath;
-  if (config.dryRun || !targetPath || !config.msaberBaseUrl) {
-    return { forwarded: false, reason: "dry-run-or-unconfigured", payload: toMsaberPayload(payload) };
+  if (config.dryRun || !isMsaberConfigured()) {
+    return { forwarded: false, reason: "dry-run-or-unconfigured", payload: await toMsaberPayload(payload) };
   }
 
-  const url = `${config.msaberBaseUrl}${targetPath.startsWith("/") ? "" : "/"}${targetPath}`;
-  const response = await fetch(url, {
+  if (action === "delete") {
+    return deleteMsaberSubscription(payload);
+  }
+
+  const msaberPayload = await toMsaberPayload(payload);
+  const result = await requestMsaber(config.msaberSubscribePath, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      [config.msaberApiKeyHeader]: config.msaberApiKey
-    },
-    body: JSON.stringify(toMsaberPayload(payload))
+    body: msaberPayload
+  });
+  return {
+    forwarded: true,
+    status: result.status,
+    ok: result.ok,
+    body: result.body,
+    payload: msaberPayload
+  };
+}
+
+async function deleteMsaberSubscription(payload) {
+  const id = payload.raw?.id || payload.raw?.rssId || payload.raw?.subscribeId;
+  if (!id) return { forwarded: false, reason: "missing-msaber-subscription-id" };
+  const pathWithId = `${config.msaberDeletePath.replace(/\/+$/g, "")}/${id}`;
+  const result = await requestMsaber(pathWithId, { method: "DELETE" });
+  return {
+    forwarded: true,
+    status: result.status,
+    ok: result.ok,
+    body: result.body
+  };
+}
+
+function isMsaberConfigured() {
+  return Boolean(config.msaberBaseUrl && config.msaberApiKey);
+}
+
+async function requestMsaber(targetPath, options = {}) {
+  const url = `${config.msaberBaseUrl}${targetPath.startsWith("/") ? "" : "/"}${targetPath}`;
+  const headers = {
+    "Content-Type": "application/json"
+  };
+  if (!options.skipAuth) {
+    if (config.msaberApiKey) headers[config.msaberApiKeyHeader] = config.msaberApiKey;
+  }
+
+  const response = await fetch(url, {
+    method: options.method || "GET",
+    headers,
+    body: options.body === undefined ? undefined : JSON.stringify(options.body)
   });
   const text = await response.text();
   return {
-    forwarded: true,
     status: response.status,
     ok: response.ok,
     body: parseMaybeJson(text) ?? text
   };
 }
 
-function toMsaberPayload(payload) {
-  return {
-    title: payload.title,
-    year: payload.year,
-    type: payload.type,
-    tmdbid: payload.tmdbId,
-    imdbid: payload.imdbId,
-    season: payload.season,
-    episode: payload.episode,
-    poster: payload.poster
-  };
+async function getDefaultSubscribeConfig(type) {
+  if (config.dryRun || !isMsaberConfigured()) return {};
+  const mediaType = type === "movie" ? "movie" : "tv";
+  const result = await requestMsaber(`/api/v1/subscribeDefaultConfig/detail/${mediaType}`);
+  return result.body?.code === 20000 && result.body?.data ? result.body.data : {};
+}
+
+async function toMsaberPayload(payload) {
+  const type = payload.type === "movie" ? "movie" : "tv";
+  const defaults = await getDefaultSubscribeConfig(type);
+  const base = Object.assign({}, defaults, {
+    id: null,
+    status: null,
+    name: payload.title,
+    type,
+    year: toNumberOrNull(payload.year),
+    tmdbId: toNumberOrNull(payload.tmdbId),
+    keyword: "",
+    include: defaults.include || "",
+    exclude: defaults.exclude || "",
+    finish: false,
+    subCloudStorage: Boolean(defaults.subCloudStorage),
+    subCloudStoragePath: defaults.subCloudStoragePath || "",
+    CsCreatorIds: defaults.csCreatorIds || defaults.CsCreatorIds || "",
+    tmdbMedia: null,
+    overview: payload.overview || ""
+  });
+
+  if (type === "tv") {
+    base.season = toNumberOrDefault(payload.season, 1);
+    base.totalEpisode = null;
+    base.startEpisode = toNumberOrDefault(payload.episode, 1);
+    base.episodes = payload.episode ? String(toNumberOrDefault(payload.episode, 1)) : null;
+    base.autoUpdateTotalEpisode = defaults.autoUpdateTotalEpisode !== undefined ? defaults.autoUpdateTotalEpisode : true;
+    base.animeMultiEpisodeMode = false;
+    base.allEpisodes = [];
+  }
+
+  return base;
+}
+
+function toNumberOrNull(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function toNumberOrDefault(value, defaultValue) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : defaultValue;
 }
 
 function readMappings() {
